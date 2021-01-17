@@ -136,18 +136,15 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
             if (oldValue == null) {
                 return new Node<>(cacheLoader.asyncLoad(key, executor));
             }
-            /* тут уже есть лок в map
             long now = System.currentTimeMillis();
+            CompletableFuture<Boolean> rem = oldValue.removal;
             if (rem == null) {
                 synchronized (oldValue.removalLock) { rem = oldValue.removal; }
             }
             synchronized (oldValue) {     //Избежать легальный interleave
                 oldValue.removal = null;
                 oldValue.refresh = now;
-            }*/
-            CompletableFuture<Boolean> rem = oldValue.removal;
-            oldValue.removal = null;
-            oldValue.refresh = System.currentTimeMillis();
+            }
             if (rem != null && !rem.isDone()) {
                 rem.cancel(true);
             }
