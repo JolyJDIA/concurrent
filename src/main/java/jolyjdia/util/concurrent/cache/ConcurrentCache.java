@@ -156,7 +156,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
        +-----------------------+-----------------------+-----------------------+
        |        Thread1        |        Thread2        |        Thread3        |
        |                       | sync() {              | sync() {              |
-       |       rem = null      | if (rem == null) true | if (rem == null) true |
+       |       rem = null      | if (rem == null) true | if (rem == null) false|
        |                       |      rem = newRem     |      rem = newRem     |
        +-----------------------+-----------------------+-----------------------+
     */
