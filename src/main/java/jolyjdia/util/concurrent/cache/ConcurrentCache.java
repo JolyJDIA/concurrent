@@ -242,11 +242,9 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
         }, executor).thenApply(remove -> {
             if (remove)
                 map.remove(key);
-            else {
-                synchronized (node) {
-                    node.removal = null;
-                    node.refresh = System.currentTimeMillis();
-                }
+            else synchronized (node) {
+                node.removal = null;
+                node.refresh = System.currentTimeMillis();
             }
             return remove;
         });
