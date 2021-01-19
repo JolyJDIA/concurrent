@@ -18,7 +18,7 @@ public class CacheBuilder<K, V> {
 
     public CacheBuilder<K, V> executor(Executor executor) {
         requireNonNull(executor);
-        this.executor = executor;
+        //this.executor = executor;
         return this;
     }
     public CacheBuilder<K, V> expireAfterAccess(long duration, TimeUnit unit) {
@@ -61,6 +61,9 @@ public class CacheBuilder<K, V> {
     }
     public ConcurrentCache<K, V> build(AsyncCacheLoader<K, V> asyncCacheLoader) {
         return new ConcurrentCache<>(asyncCacheLoader, this);
+    }
+    public ConcurrentCache0<K, V> build0(AsyncCacheLoader<K, V> asyncCacheLoader) {
+        return new ConcurrentCache0<>(asyncCacheLoader, this);
     }
 
     public Executor getExecutor() {
