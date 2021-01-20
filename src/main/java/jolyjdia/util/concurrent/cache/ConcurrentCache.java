@@ -79,7 +79,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
                 afterWrite = builder.getExpireAfterWrite();
 
         cleaner.scheduleAtFixedRate(() -> map.forEach((key, node) -> {
-            if (node.getRemoval() != null) {//если готов или инициализирован
+            if (node.isRemoval()) {//если готов или инициализирован
                 return;
             }
             //rem = null | refresh = latest
@@ -122,11 +122,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
             return null;
         }
 
-        public boolean interruptRemoving() {//не отменять если CANCELLED и INTERRUPTING и NULL
-            //if COMPLETING or NORMAL
-
-            //if COMPLETING -> wait -> NORMA -> cancel
-            //if NORMAL -> INTERRUPTING
+        public boolean interruptRemoving() {
             for(;;) {
                 if (status == COMPLETING) {
                     if (STATUS.weakCompareAndSet(this, COMPLETING, INTERRUPTING)) {
@@ -167,6 +163,9 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
         }
         public final boolean isCancelled() {
             return (status & (INTERRUPTING | CANCELLED)) != 0;
+        }
+        public final boolean isRemoval() {
+            return (status & (SET | SIGNAL | COMPLETING | INTERRUPTING)) != 0;
         }
 
         public final boolean isCompletedAbnormally() {
