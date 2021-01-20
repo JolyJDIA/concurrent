@@ -122,7 +122,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
             return null;
         }
 
-        public boolean interruptRemoving() {
+        public boolean interruptRemoving() {//todo: какая-то хрень
             for(;;) {
                 if (status == COMPLETING) {
                     if (STATUS.weakCompareAndSet(this, COMPLETING, INTERRUPTING)) {
@@ -155,7 +155,8 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
                     STATUS.setRelease(this, SET);
                 }
             }
-            return rem;
+            //check status
+            return rem;        // todo: может вернуть cf is cancelled
         }
 
         public final boolean isDone() {
