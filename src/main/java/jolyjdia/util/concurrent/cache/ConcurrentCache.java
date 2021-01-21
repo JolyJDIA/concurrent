@@ -19,20 +19,6 @@ import java.util.function.Supplier;
  * @author JolyJDIA
  */
 public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
-    /*
-     * The main purpose of this cache is completely asynchronous loading / unloading
-     * guarantees fully consistent cache behavior
-     * cache uses thread safe hash table
-     * value - the node containing the write time and the last read
-     * removing one of the "status" fields in ConcurrentCache is based on a non-blocking future
-     * we cannot know when the deletion process will occur
-     * cache safely sets up exactly one delete process for each sync block
-     * to avoid double assignments that we might lose (otherwise it will be deleted two or more times)
-     * deletion can only start after loading the value
-     * double check locking is used for optimization
-     * according to the semantics of the Java Memory Model, the field must be marked as volatile
-     */
-
     /* ---------------- Constants -------------- */
 
     /** unstable nodes */
@@ -82,7 +68,6 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
             if (node.isRemoval()) {//если готов или инициализирован
                 return;
             }
-            //rem = null | refresh = latest
             long now = System.currentTimeMillis();
             if ((afterAccess != NESTED && now - node.refresh >= afterAccess) ||
                 (afterWrite  != NESTED && now - node.start   >= afterWrite)
@@ -94,17 +79,16 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
     /* ---------------- Nodes -------------- */
 
     private static class Node<V> {
-        //3-тье состояние
         /**
          * статусы перехода
          * гарантирует атомарность операций используем CAS вместо sync block
          * из-за чрезвычайного уровня блокировок
          */
-        private static final int SET          = 1 << 31; // must be negative
-        private static final int COMPLETING   = 1 << 19;
-        private static final int CANCELLED    = 1 << 18;
-        private static final int INTERRUPTING = 1 << 17;
-        private static final int SIGNAL       = 1 << 16; // true if rem is done
+        private static final int SET          = 1 << 31; // 1 must be negative
+        private static final int COMPLETING   = 1 << 19; // 2
+        private static final int CANCELLED    = 1 << 18; // 3
+        private static final int INTERRUPTING = 1 << 17; // 4
+        private static final int SIGNAL       = 1 << 16; // 5 true if rem is done
 
         final CompletableFuture<V> cf;
         final long start = System.currentTimeMillis();
@@ -117,35 +101,34 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
         }
 
         public CompletableFuture<Boolean> getRemoval() {
-            if ((status & (SET | SIGNAL)) != 0)
+            if ((status & (SET | SIGNAL | INTERRUPTING)) != 0)
                 return rem;
             return null;
         }
 
-        public boolean interruptRemoving() {//todo: какая-то хрень
-            for(;;) {
-                if (status == COMPLETING) {
-                    if (STATUS.weakCompareAndSet(this, COMPLETING, INTERRUPTING)) {
-                        break;
-                    }
-                } else if (!STATUS.compareAndSet(this, SET, INTERRUPTING)) {
+
+        public boolean interruptRemoving() {
+            for(int s;;) {
+                //set or completing
+                if ((s = status) > COMPLETING)
                     return false;
+                else if (STATUS.weakCompareAndSet(this, s, INTERRUPTING)) {
+                    try {
+                        refresh = System.currentTimeMillis();
+                        CompletableFuture<Boolean> cf = rem;
+                        if (cf != null && (!cf.isDone() && !cf.isCancelled())) {
+                            cf.cancel(true);
+                        }
+                    } finally { // final state
+                        STATUS.setRelease(this, CANCELLED);
+                    }
+                    return true;
                 }
             }
-            try {
-                refresh = System.currentTimeMillis();
-                CompletableFuture<Boolean> cf = rem;
-                if (cf != null && (!cf.isDone() && !cf.isCancelled())) {
-                    cf.cancel(true);
-                }
-            } finally { // final state
-                STATUS.setRelease(this, CANCELLED);
-            }
-            return true;
         }
-        private static final int mask = (SIGNAL | CANCELLED);
+        private static final int SET_MASK = (SIGNAL | CANCELLED);
         protected CompletableFuture<Boolean> set(Supplier<CompletableFuture<Boolean>> supplier) {
-            if (STATUS.compareAndSet(this, (status & mask), COMPLETING)) {//done or init
+            if (STATUS.compareAndSet(this, (status & SET_MASK), COMPLETING)) {//done or init
                 try {
                     return rem = supplier.get().thenApply(x -> {
                         STATUS.setRelease(this, SIGNAL);
@@ -189,7 +172,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
         public int hashCode() {
             return cf.hashCode() ^ (int)(start ^ (start >>> 32));
         }
-        // VarHandle mechanics
+        // VarHandle mechanics | Джава 8 ебана в жопу ее со своим AtomicReference
         private static final VarHandle STATUS;
 
         static {
@@ -201,14 +184,6 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
             }
         }
     }
-    /*
-       +-----------------------+-----------------------+-----------------------+
-       |        Thread1        |        Thread2        |        Thread3        |
-       |                       | sync() {              | sync() {              |
-       |       rem = null      | if (rem == null) true | if (rem == null) false|
-       |                       |      rem = newRem     |      rem = newRem     |
-       +-----------------------+-----------------------+-----------------------+
-    */
     @Override
     public CompletableFuture<V> getAndPut(K key) {
         return map.compute(key, (k, oldValue) -> {
@@ -232,14 +207,6 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
         });
     }
     /* ---------------- Remove -------------- */
-    /*
-       +-----------------------+-----------------------+-----------------------+
-       |        Thread1        |        Thread2        |        Thread3        |
-       |                       | sync() {              | sync() {              |
-       |       rem = null      | if (rem == null) true | if (rem == null) false|
-       |                       |      rem = newRem     |      rem = newRem     |
-       +-----------------------+-----------------------+-----------------------+
-    */
 
     @Override
     public CompletableFuture<Boolean> removeSafe(K key) {

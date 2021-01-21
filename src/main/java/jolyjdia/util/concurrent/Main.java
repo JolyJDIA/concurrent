@@ -112,40 +112,41 @@ public class Main {
                 .build(new CacheBuilder.AsyncCacheLoader<Integer, String>() {
                     @Override
                     public CompletableFuture<String> asyncLoad(Integer key, Executor executor) {
-                        return CompletableFuture.completedFuture("dsadasda");
+                        return CompletableFuture.supplyAsync(() -> "dsadasda");
                     }
                 });
-        final int THREADS = 3;
-        ConcurrentHashMap<Integer, CompletableFuture<String>> map = new ConcurrentHashMap<>();
-        for (int i = 0; i < 30; ++i) {
+        cache.getAndPut(1).thenAccept(e -> {
+            System.out.println("add "+cache.size());
+        });
+        cache.removeSafe(1).thenAccept(e -> {
+            System.out.println("remove " + cache.size());
+        });
+        cache.getAndPut(1).thenAccept(e -> {
+            System.out.println("add "+cache.size());
             new Thread(() -> {
                 for (;;) {
-                    int rand = ThreadLocalRandom.current().nextInt(THREADS);
-                    /*map.compute(rand, (k, old) -> {
-                        if (old == null) {
-                            return CompletableFuture.completedFuture("dsadasda");
-                        }
-                        old.thenRun(() -> {});
-                        return old;
-                    });*/
-                    cache.getAndPut(rand);
-                }
-            }).start();
-            new Thread(() -> {
-                for (;;) {
-                    int rand = ThreadLocalRandom.current().nextInt(THREADS);
-                    /*CompletableFuture<String> cf = map.get(rand);
-                    if (cf != null) {
-                        map.remove(rand);
-                    }*/
-                    cache.removeSafe(rand);
                     try {
                         Thread.sleep(1);
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
+                    } catch (InterruptedException r) {
+                        r.printStackTrace();
                     }
+                    cache.getAndPut(1).thenRun(() -> {
+                        System.out.println("add "+cache.size());
+                    });
                 }
             }).start();
-        }
+            new Thread(() -> {
+                for (; ; ) {
+                    try {
+                        Thread.sleep(5);
+                    } catch (InterruptedException r) {
+                        r.printStackTrace();
+                    }
+                    cache.removeSafe(1).thenRun(() -> {
+                        System.out.println("remove " + cache.size());
+                    });
+                }
+            }).start();
+        });
     }
 }
