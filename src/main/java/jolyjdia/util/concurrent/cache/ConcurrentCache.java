@@ -190,7 +190,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
                 return new Node<>(cacheLoader.asyncLoad(key, executor));
             }
             if(oldValue.interruptRemoving()) {
-                System.out.println("Джекпот");
+
             }
             return oldValue;
         }).cf;

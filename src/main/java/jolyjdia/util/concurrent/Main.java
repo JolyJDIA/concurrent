@@ -15,6 +15,7 @@ public class Main {
         node.set(new CompletableFuture<>());
         node.interruptRemoving();
         Thread.sleep(100);
+        Executors.newCachedThreadPool()
         node.set(CompletableFuture.supplyAsync(() -> true));
         /**for (int i = 0; i < 5; ++i) {
             new Thread(() -> {
@@ -116,37 +117,10 @@ public class Main {
                     }
                 });
         cache.getAndPut(1).thenAccept(e -> {
-            System.out.println("add "+cache.size());
+           CompletableFuture.anyOf(cache.removeAll().toArray(new CompletableFuture[0])).thenRun(() -> {
+               System.out.println(cache.size());
+           });
         });
-        cache.removeSafe(1).thenAccept(e -> {
-            System.out.println("remove " + cache.size());
-        });
-        cache.getAndPut(1).thenAccept(e -> {
-            System.out.println("add "+cache.size());
-            new Thread(() -> {
-                for (;;) {
-                    try {
-                        Thread.sleep(1);
-                    } catch (InterruptedException r) {
-                        r.printStackTrace();
-                    }
-                    cache.getAndPut(1).thenRun(() -> {
-                        System.out.println("add "+cache.size());
-                    });
-                }
-            }).start();
-            new Thread(() -> {
-                for (; ; ) {
-                    try {
-                        Thread.sleep(5);
-                    } catch (InterruptedException r) {
-                        r.printStackTrace();
-                    }
-                    cache.removeSafe(1).thenRun(() -> {
-                        System.out.println("remove " + cache.size());
-                    });
-                }
-            }).start();
-        });
+        for (;;) {}
     }
 }
