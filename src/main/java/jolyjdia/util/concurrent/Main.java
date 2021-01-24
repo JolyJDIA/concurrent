@@ -2,6 +2,7 @@ package jolyjdia.util.concurrent;
 
 import jolyjdia.util.concurrent.cache.CacheBuilder;
 import jolyjdia.util.concurrent.cache.ConcurrentCache;
+import jolyjdia.util.concurrent.cache.FutureCache;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
@@ -100,7 +101,7 @@ public class Main {
     }
 
     public static void main(String[] args) {
-        ConcurrentCache<Integer, String> cache = new CacheBuilder<Integer, String>()
+        FutureCache<Integer, String> cache = new CacheBuilder<Integer, String>()
                 .removal(new CacheBuilder.RemovalListener<Integer, String>() {
                     @Override
                     public CompletableFuture<Boolean> onRemoval(Integer key, CompletableFuture<String> v) {
@@ -109,7 +110,7 @@ public class Main {
                         });
                     }
                 })
-                .build(new CacheBuilder.AsyncCacheLoader<Integer, String>() {
+                .build0(new CacheBuilder.AsyncCacheLoader<Integer, String>() {
                     @Override
                     public CompletableFuture<String> asyncLoad(Integer key, Executor executor) {
                         return CompletableFuture.supplyAsync(() -> "dsadasda");
@@ -122,31 +123,35 @@ public class Main {
             System.out.println("remove " + cache.size());
         });
         cache.getAndPut(1).thenAccept(e -> {
-            System.out.println("add "+cache.size());
-            new Thread(() -> {
-                for (;;) {
-                    try {
-                        Thread.sleep(1);
-                    } catch (InterruptedException r) {
-                        r.printStackTrace();
+            for (int i = 0; i < 6; ++i) {
+                new Thread(() -> {
+                    for (; ; ) {
+                        try {
+                            Thread.sleep(2);
+                        } catch (InterruptedException r) {
+                            r.printStackTrace();
+                        }
+                        int rand = ThreadLocalRandom.current().nextInt(3);
+                        cache.getAndPut(rand).thenRun(() -> {
+                            //  System.out.println("add "+cache.size());
+                        });
                     }
-                    cache.getAndPut(1).thenRun(() -> {
-                        System.out.println("add "+cache.size());
-                    });
-                }
-            }).start();
-            new Thread(() -> {
-                for (; ; ) {
-                    try {
-                        Thread.sleep(5);
-                    } catch (InterruptedException r) {
-                        r.printStackTrace();
+                }).start();
+                new Thread(() -> {
+                    for (; ; ) {
+                        try {
+                            Thread.sleep(1);
+                        } catch (InterruptedException r) {
+                            r.printStackTrace();
+                        }
+                        int rand = ThreadLocalRandom.current().nextInt(3);
+                        cache.removeSafe(rand).thenRun(() -> {
+                            //System.out.println("remove " + cache.size());
+                        });
                     }
-                    cache.removeSafe(1).thenRun(() -> {
-                        System.out.println("remove " + cache.size());
-                    });
-                }
-            }).start();
+                }).start();
+            }
         });
+        for(;;) {}
     }
 }

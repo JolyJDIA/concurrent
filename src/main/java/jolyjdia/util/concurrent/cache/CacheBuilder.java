@@ -59,8 +59,11 @@ public class CacheBuilder<K, V> {
         this.strength = Strength.WEAK;
         return this;
     }
-    public ConcurrentCache<K, V> build(AsyncCacheLoader<K, V> asyncCacheLoader) {
+    public FutureCache<K, V> build(AsyncCacheLoader<K, V> asyncCacheLoader) {
         return new ConcurrentCache<>(asyncCacheLoader, this);
+    }
+    public FutureCache<K, V> build0(AsyncCacheLoader<K, V> asyncCacheLoader) {
+        return new ConcurrentCache0<>(asyncCacheLoader, this);
     }
     public Executor getExecutor() {
         return executor;
