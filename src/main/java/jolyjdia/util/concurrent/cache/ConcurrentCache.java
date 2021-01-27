@@ -42,7 +42,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
     private static final long serialVersionUID = 6208003448940831310L;
 
     /* ---------------- Fields -------------- */
-    private final ConcurrentHashMap<K,Node<V>> map;
+    private final ConcurrentHashMap<K,Node<K,V>> map;
     private final CacheBuilder.AsyncCacheLoader<? super K, V> cacheLoader;
 
     // builder
@@ -66,7 +66,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
                 tick = builder.getTick(),
                 afterWrite = builder.getExpireAfterWrite();
 
-    /*    cleaner.scheduleAtFixedRate(() -> map.forEach((key, node) -> {
+        cleaner.scheduleAtFixedRate(() -> map.forEach((key, node) -> {
             if ((node.status & SET_MASK) == 0) {
                 return;
             }
@@ -74,13 +74,13 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
             if ((afterAccess != NESTED && now - node.refresh >= afterAccess) ||
                     (afterWrite  != NESTED && now - node.start   >= afterWrite)
             ) {
-                node.set0(() -> safeRemoval(key, node));
+                node.set0(key);
             }
-        }), tick, tick, TimeUnit.MILLISECONDS);*/
+        }), tick, tick, TimeUnit.MILLISECONDS);
     }
     /* ---------------- Nodes -------------- */
 
-    static class Node<V> {
+    static class Node<K, V> {
         /**
          * статусы перехода
          * гарантирует атомарность операций используем CAS вместо sync block
@@ -94,11 +94,13 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
 
         final CompletableFuture<V> cf;
         final long start = System.currentTimeMillis();
+        final ConcurrentCache<K, V> cache;
         CompletableFuture<Boolean> rem; // можно опустить volatile т.к. я читаю один раз
         long refresh = start;
         volatile int status = SIGNAL;
 
-        public Node(CompletableFuture<V> cf) {
+        public Node(ConcurrentCache<K, V> cache, CompletableFuture<V> cf) {
+            this.cache = cache;
             this.cf = cf;
         }
 
@@ -134,13 +136,20 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
         }
         static final int SET_MASK = (SIGNAL | CANCELLED);
 
-        private CompletableFuture<Boolean> set(Supplier<CompletableFuture<Boolean>> supplier) {
+        private CompletableFuture<Boolean> set(K key) {
             int s;
             if (STATUS.compareAndSet(this, ((s = status) & SET_MASK), COMPLETING)) {//done or init
                 try {
-                    return rem = supplier.get().thenApply(x -> {
+                    return rem = cf.thenComposeAsync(f -> {
+                        return cache.removalListener.onRemoval(key, cf);
+                    }, cache.executor).thenApply(remove -> {
+                        if (remove) {
+                            cache.map.remove(key);
+                        } else {
+                            refresh = System.currentTimeMillis();
+                        }
                         STATUS.setRelease(this, SIGNAL);
-                        return x;
+                        return remove;
                     });
                 } finally {
                     STATUS.setRelease(this, SET);
@@ -148,12 +157,19 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
             }
             return awaitGet(s);
         }
-        private void set0(Supplier<CompletableFuture<Boolean>> supplier) {
+        private void set0(K key) {
             if (STATUS.compareAndSet(this, (status & SET_MASK), COMPLETING)) {//done or init
                 try {
-                    this.rem = supplier.get().thenApply(x -> {
+                    rem = cf.thenComposeAsync(f -> {
+                        return cache.removalListener.onRemoval(key, cf);
+                    }, cache.executor).thenApply(remove -> {
+                        if (remove) {
+                            cache.map.remove(key);
+                        } else {
+                            refresh = System.currentTimeMillis();
+                        }
                         STATUS.setRelease(this, SIGNAL);
-                        return x;
+                        return remove;
                     });
                 } finally {
                     STATUS.setRelease(this, SET);
@@ -173,7 +189,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
         public boolean equals(Object o) {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
-            Node<?> node = (Node<?>) o;
+            Node<?, ?> node = (Node<?, ?>) o;
             return start == node.start && cf.equals(node.cf);
         }
 
@@ -197,7 +213,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
     public CompletableFuture<V> getAndPut(K key) {
         return map.compute(key, (k, oldValue) -> {
             if (oldValue == null) {
-                return new Node<>(cacheLoader.asyncLoad(key, executor));
+                return new Node<>(this, cacheLoader.asyncLoad(key, executor));
             }
             if(oldValue.interruptRemoving()) {
 
@@ -205,41 +221,26 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
             return oldValue;
         }).cf;
     }
-    private CompletableFuture<Boolean> safeRemoval(K key, Node<V> node) {
-        CompletableFuture<V> cf = node.cf;
-        return cf.thenComposeAsync(f -> {
-            return removalListener.onRemoval(key, cf);
-        }, executor).thenApply(remove -> {
-            if (remove)
-                map.remove(key);
-            else
-                node.refresh = System.currentTimeMillis();
-            return remove;
-        });
-    }
+
     /* ---------------- Remove -------------- */
 
     @Override
     public CompletableFuture<Boolean> removeSafe(K key) {
-        Node<V> node = map.get(key);
+        Node<K, V> node = map.get(key);
         if (node == null) {
             return CompletableFuture.failedFuture(new NullPointerException());
         }
-        return node.set(() -> safeRemoval(key, node));
+        return node.set(key);
     }
     @Override
     public CompletableFuture<Boolean> remove(K key) {
-        Node<V> node = map.remove(key);
-        if (node == null) {
-            return CompletableFuture.failedFuture(new NullPointerException());
-        }
-        return node.set(() -> safeRemoval(key, node));
+        return removeSafe(key);
     }
     @Override
     public List<CompletableFuture<Boolean>> removeAll() {
         return map.entrySet().stream().map(x -> {
-            Node<V> node = x.getValue();
-            return node.set(() -> safeRemoval(x.getKey(), node));
+            Node<K, V> node = x.getValue();
+            return node.set(x.getKey());
         }).collect(Collectors.toList());
     }
     @Override
@@ -249,7 +250,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
 
     @Override
     public boolean isLoad(K key) {
-        Node<V> node = map.get(key);
+        Node<K, V> node = map.get(key);
         return node != null && node.cf.isDone();
     }
 

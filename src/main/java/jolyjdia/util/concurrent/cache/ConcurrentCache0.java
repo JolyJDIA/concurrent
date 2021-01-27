@@ -1,6 +1,5 @@
 package jolyjdia.util.concurrent.cache;
 
-import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.*;
 
@@ -9,6 +8,9 @@ import java.io.Serializable;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.*;
+import java.util.stream.Collectors;
+
+import static jolyjdia.util.concurrent.cache.ConcurrentCache.Node.SET_MASK;
 
 /**
  * @param <K> - the type of keys
@@ -51,7 +53,7 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
     private static final long serialVersionUID = 6208003448940831310L;
 
     /* ---------------- Fields -------------- */
-    private final ConcurrentHashMap<K,Node<V>> map;
+    private final ConcurrentHashMap<K,Node<K,V>> map;
     private final CacheBuilder.AsyncCacheLoader<? super K, V> cacheLoader;
 
     // builder
@@ -74,29 +76,99 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
         final long afterAccess = builder.getExpireAfterAccess(),
                 tick = builder.getTick(),
                 afterWrite = builder.getExpireAfterWrite();
+
+        cleaner.scheduleAtFixedRate(() -> map.values().forEach(node -> {
+            if (node.isRemoving()) {
+                return;
+            }
+            long now = System.currentTimeMillis();
+            if ((afterAccess != NESTED && now - node.lifetime >= afterAccess) ||
+                (afterWrite  != NESTED && now - node.start    >= afterWrite)
+            ) {
+                CompletableFuture<Boolean> rem = node.withdrawal;
+                if (rem != null && !rem.isCancelled()) {
+                    return;
+                }
+                synchronized (node.f) {
+                    if (node.withdrawal == null) {
+                        node.withdrawal = node.safeRemoval();
+                    }
+                }
+            }
+        }), tick, tick, TimeUnit.MILLISECONDS);
     }
     /* ---------------- Nodes -------------- */
 
-    private static class Node<V> {
-        //3-тье состояние
+    private static class Node<K,V> {
+        final ConcurrentCache0<K,V> cache;
+        final K key;
         final CompletableFuture<V> cf;
         final long start = System.currentTimeMillis();
-        volatile long refresh = start;
-        volatile CompletableFuture<Boolean> removal;
-        private final Object removalLock = new Object();
+        volatile long lifetime = start;
+        volatile CompletableFuture<Boolean> withdrawal;
 
-        public Node(CompletableFuture<V> cf) {
-            this.cf = cf;
+        public Node(ConcurrentCache0<K,V> cache, K key) {
+            this.cache = cache;
+            this.key = key;
+            this.cf = cache.cacheLoader.asyncLoad(key, cache.executor);
         }
+        private final Object f = new Object();
+
+        public CompletableFuture<Boolean> getWithdrawal() {
+            CompletableFuture<Boolean> rem = withdrawal;
+            if (rem != null && !rem.isCancelled()) {
+                return rem;
+            }
+            synchronized (f) {
+                if (withdrawal == null) {
+                    withdrawal = safeRemoval();
+                }
+                return withdrawal;
+            }
+        }
+        public boolean interruptRemoving() {
+            lifetime = System.currentTimeMillis();
+            CompletableFuture<Boolean> cf = withdrawal;
+            if (cf != null && cf.isCancelled()) {
+                return true;
+            }
+            synchronized (f) {
+                cf = withdrawal;
+                withdrawal = null;
+            }
+            return cf != null && !cf.isCancelled() && cf.cancel(true);
+        }
+
+        private CompletableFuture<Boolean> safeRemoval() {
+            return cf.thenComposeAsync(f -> {
+                return cache.removalListener.onRemoval(key, cf);
+            }, cache.executor).thenApply(remove -> {
+                if (remove) cache.map.remove(key);
+                else signal();
+                return remove;
+            });
+        }
+
+        /**
+         * Последовательно согласованы т к volatile
+         * в связи с спецификацией JMM
+         * если withdrawal = null, то есть гарантия, что lifetime актуален
+         */
+        private void signal() {
+            lifetime = System.currentTimeMillis();
+            withdrawal = null;
+        }
+
+
         public final boolean isRemoving() {
-            return removal != null;
+            return withdrawal != null;
         }
 
         @Override
         public boolean equals(Object o) {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
-            Node<?> node = (Node<?>) o;
+            Node<?,?> node = (Node<?,?>) o;
             return start == node.start && cf.equals(node.cf);
         }
 
@@ -105,114 +177,45 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
             return cf.hashCode() ^ (int)(start ^ (start >>> 32));
         }
     }
-    /*
-       +-----------------------+-----------------------+-----------------------+
-       |        Thread1        |        Thread2        |        Thread3        |
-       |                       | sync() {              | sync() {              |
-       |       rem = null      | if (rem == null) true | if (rem == null) false|
-       |                       |      rem = newRem     |      rem = newRem     |
-       +-----------------------+-----------------------+-----------------------+
-    */
     @Override
     public CompletableFuture<V> getAndPut(K key) {
-        return map.compute(key, (k, oldValue) -> {
+        Node<K,V> node = map.get(key);
+        if (node == null) {
+            node = new Node<>(this, key);
+        } else {
+            node.interruptRemoving();
+        }
+        map.put(key, node);
+        return node.cf;
+        /*return map.compute(key, (k, oldValue) -> {
             if (oldValue == null) {
-                return new Node<>(cacheLoader.asyncLoad(key, executor));
+                return new Node<>(this, key);
             }
-            final long now = System.currentTimeMillis();
-
-            CompletableFuture<Boolean> rem;
-            synchronized (oldValue.removalLock) {
-                rem = oldValue.removal;
-                oldValue.refresh = now;
-                oldValue.removal = null;
-            }
-            if ((rem != null && !rem.isDone() && !rem.isCancelled())) {
-                rem.cancel(true);
-            }
+            oldValue.interruptRemoving();
             return oldValue;
-        }).cf;
-    }
-    private CompletableFuture<Boolean> safeRemoval(K key, Node<V> node) {
-        CompletableFuture<V> cf = node.cf;
-        return cf.thenComposeAsync(f -> {
-            return removalListener.onRemoval(key, cf);
-        }, executor).thenApply(remove -> {
-            if (remove)
-                map.remove(key);
-            else {
-                //последовательно согласованы
-                node.refresh = System.currentTimeMillis();
-                node.removal = null;
-            }
-            return remove;
-        });
+        }).cf;*/
     }
     /* ---------------- Remove -------------- */
-    /*
-       +-----------------------+-----------------------+-----------------------+
-       |        Thread1        |        Thread2        |        Thread3        |
-       |                       | sync() {              | sync() {              |
-       |       rem = null      | if (rem == null) true | if (rem == null) false|
-       |                       |      rem = newRem     |      rem = newRem     |
-       +-----------------------+-----------------------+-----------------------+
-    */
 
     @Override
     public CompletableFuture<Boolean> removeSafe(K key) {
-        Node<V> node = map.get(key);
+        Node<K,V> node = map.get(key);
         if (node == null) {
             return CompletableFuture.failedFuture(new NullPointerException());
         }
-        CompletableFuture<Boolean> rem = node.removal;
-        if (rem != null) {
-            return rem;
-        }
-        synchronized (node.removalLock) {
-            CompletableFuture<Boolean> cf = node.removal;//!= null
-            if (cf == null) {
-                return node.removal = safeRemoval(key, node);
-            }
-            return cf;
-        }
+        return node.getWithdrawal();
     }
     @Override
     public CompletableFuture<Boolean> remove(K key) {
-        Node<V> node = map.remove(key);
+        Node<K,V> node = map.remove(key);
         if (node == null) {
             return CompletableFuture.failedFuture(new NullPointerException());
         }
-        CompletableFuture<Boolean> rem = node.removal;
-        if (rem != null) {
-            return rem;
-        }
-        synchronized (node.removalLock) {
-            CompletableFuture<Boolean> cf = node.removal;
-            if (cf == null) {
-                CompletableFuture<V> cf0 = node.cf;
-                return node.removal = cf0.thenComposeAsync(f -> {
-                    return removalListener.onRemoval(key, cf0);
-                }, executor);
-            }
-            return cf;
-        }
+        return node.getWithdrawal();
     }
     @Override
     public List<CompletableFuture<Boolean>> removeAll() {
-        List<CompletableFuture<Boolean>> cfs = new LinkedList<>();
-
-        map.forEach((key, node) -> {
-            CompletableFuture<Boolean> removal;
-
-            if ((removal = node.removal) == null) {
-                synchronized (node.removalLock) {
-                    CompletableFuture<Boolean> cf = node.removal;
-                    removal = cf == null ? (node.removal = safeRemoval(key, node)) : cf;
-                }
-            }
-            cfs.add(removal);
-        });
-        return cfs;
+        return map.values().stream().map(Node::getWithdrawal).collect(Collectors.toList());
     }
     @Override
     public boolean containsKey(K key) {
@@ -221,7 +224,7 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
 
     @Override
     public boolean isLoad(K key) {
-        Node<V> node = map.get(key);
+        Node<K,V> node = map.get(key);
         return node != null && node.cf.isDone();
     }
 

@@ -9,31 +9,24 @@ import java.lang.invoke.VarHandle;
 import java.util.concurrent.*;
 
 public class Main {
-    public static void main0(String[] args) throws InterruptedException {
-
-
-        Node node = new Node();
-        node.set(new CompletableFuture<>());
-        node.interruptRemoving();
-        Thread.sleep(100);
-        node.set(CompletableFuture.supplyAsync(() -> true));
-        /**for (int i = 0; i < 5; ++i) {
-            new Thread(() -> {
-                for (;;) {
-                    //node.interruptRemoving();
-                }
-            }).start();
-            new Thread(() -> {
-                for (;;) {
-                    node.set(CompletableFuture.supplyAsync(() -> true));
-                    try {
-                        Thread.sleep(5);
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
-                }
-            }).start();
-        }*/
+    public static void main1(String[] args) throws InterruptedException {
+        CompletableFuture<String> cf = CompletableFuture.supplyAsync(() -> "dasdasd");
+        ConcurrentHashMap<Integer, String> map = new ConcurrentHashMap<>();
+        for (int i = 0; i < 50; ++i) {
+            map.put(i, "dsad");
+        }
+        long s = System.currentTimeMillis();
+        cf.thenComposeAsync(f -> {
+            return CompletableFuture.completedFuture(true);
+        }).thenApply(remove -> {
+            if (remove)
+                map.remove(1);
+            else
+                System.currentTimeMillis();
+            return remove;
+        });
+        long e = System.currentTimeMillis() - s;
+        System.out.println(e);
     }
     public static class Node {
         /**
@@ -123,20 +116,7 @@ public class Main {
             System.out.println("remove " + cache.size());
         });
         cache.getAndPut(1).thenAccept(e -> {
-            for (int i = 0; i < 6; ++i) {
-                new Thread(() -> {
-                    for (; ; ) {
-                        try {
-                            Thread.sleep(2);
-                        } catch (InterruptedException r) {
-                            r.printStackTrace();
-                        }
-                        int rand = ThreadLocalRandom.current().nextInt(3);
-                        cache.getAndPut(rand).thenRun(() -> {
-                            //  System.out.println("add "+cache.size());
-                        });
-                    }
-                }).start();
+            for (int i = 0; i < 3; ++i) {
                 new Thread(() -> {
                     for (; ; ) {
                         try {
@@ -144,7 +124,15 @@ public class Main {
                         } catch (InterruptedException r) {
                             r.printStackTrace();
                         }
-                        int rand = ThreadLocalRandom.current().nextInt(3);
+                        int rand = ThreadLocalRandom.current().nextInt(4);
+                        cache.getAndPut(rand).thenRun(() -> {
+                             // System.out.println("add "+cache.size());
+                        });
+                    }
+                }).start();
+                new Thread(() -> {
+                    for (; ; ) {
+                        int rand = ThreadLocalRandom.current().nextInt(4);
                         cache.removeSafe(rand).thenRun(() -> {
                             //System.out.println("remove " + cache.size());
                         });
