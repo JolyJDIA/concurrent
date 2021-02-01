@@ -141,7 +141,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
             if (STATUS.compareAndSet(this, ((s = status) & SET_MASK), COMPLETING)) {//done or init
                 try {
                     return rem = cf.thenComposeAsync(f -> {
-                        return cache.removalListener.onRemoval(key, cf);
+                        return cache.removalListener.onRemoval(key, f);
                     }, cache.executor).thenApply(remove -> {
                         if (remove) {
                             cache.map.remove(key);
@@ -161,7 +161,7 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
             if (STATUS.compareAndSet(this, (status & SET_MASK), COMPLETING)) {//done or init
                 try {
                     rem = cf.thenComposeAsync(f -> {
-                        return cache.removalListener.onRemoval(key, cf);
+                        return cache.removalListener.onRemoval(key, f);
                     }, cache.executor).thenApply(remove -> {
                         if (remove) {
                             cache.map.remove(key);
@@ -220,6 +220,11 @@ public class ConcurrentCache<K,V> implements FutureCache<K,V>, Serializable {
             }
             return oldValue;
         }).cf;
+    }
+
+    @Override
+    public CompletableFuture<V> put(K key, CompletableFuture<V> v) {
+        return null;
     }
 
     /* ---------------- Remove -------------- */

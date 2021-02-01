@@ -109,6 +109,6 @@ public class CacheBuilder<K, V> {
     }
     @FunctionalInterface
     public interface RemovalListener<K, V> {
-        CompletableFuture<Boolean> onRemoval(K key, CompletableFuture<V> v);
+        CompletableFuture<Boolean> onRemoval(K key, V value);
     }
 }

@@ -7,6 +7,8 @@ public interface FutureCache<K,V> {
 
     CompletableFuture<V> getAndPut(K key);
 
+    CompletableFuture<V> put(K key, CompletableFuture<V> v);
+
     CompletableFuture<Boolean> removeSafe(K key);
 
     CompletableFuture<Boolean> remove(K key);

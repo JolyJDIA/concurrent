@@ -1,45 +1,65 @@
 package jolyjdia.util.concurrent;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 
 public class Node {
     private final Object f = new Object();
-    private volatile CompletableFuture<Boolean> withdrawal;
-    private volatile long time;
+    private volatile CompletableFuture<Boolean> unloadCf;
+    private final CompletableFuture<Object> loaderCf = CompletableFuture.completedFuture("dasd");
+    private volatile boolean signal;
 
     public CompletableFuture<Boolean> newWithdrawal() {
-        CompletableFuture<Boolean> rem = withdrawal;
-        if (rem != null && !rem.isCancelled()) {
-            return rem;
+        CompletableFuture<Boolean> cfL = unloadCf;
+        if ((cfL == null || cfL.isDone()) && signal) {
+            return (CompletableFuture<Boolean>) UNLOAD.compareAndExchange(this, cfL,
+            loaderCf.thenComposeAsync(f -> {
+                return CompletableFuture.completedFuture(true);
+            }).thenApply(remove -> {
+                if (!remove || !signal) {
+                    return false;
+                }
+                System.out.println("remove");
+                return true;
+            }).exceptionally(f -> false));
         }
-        synchronized (f) {
-            if (withdrawal == null) {
-                withdrawal = new CompletableFuture<Boolean>().thenApply(x -> {
-                    signal();
-                    return x;
-                });
-            }
-            return withdrawal;
-        }
+        return unloadCf;
     }
+    public CompletableFuture<Object> interruptRemoving() {
+        signal = false;
+        return (CompletableFuture<Object>) UNLOAD.compareAndExchange(this, unloadCf,
+                unloadCf.thenApply(cancelled -> {
+                    try {
+                        if (!cancelled) {
+                            System.out.println("put");
+                        } return cancelled;
+                    } finally {
+                        signal = true;
+                    }
+                }));
 
-    private void signal() {
-        time = 1;
-        withdrawal = null;
     }
+    public CompletableFuture<Object> put() {
+        CompletableFuture<Object> cf = loaderCf;
+        return (CompletableFuture<Object>) LOADER.compareAndExchange(this, cf,
+                interruptRemoving().thenCompose(f -> {
+                    return cf;
+                }).thenCompose(x -> {
+                    return CompletableFuture.completedFuture("newCf");
+                }));
+    }
+    // VarHandle mechanics | Джава 8 ебана в жопу ее со своим AtomicReference
+    private static final VarHandle LOADER, UNLOAD;
 
-    public boolean interruptRemoving() {
-        time = 1;
-        CompletableFuture<Boolean> cf = withdrawal;
-        if (cf != null && cf.isCancelled()) {//если успело отменить, то у меня уже null
-            return true;
+    static {
+        try {
+            MethodHandles.Lookup l = MethodHandles.lookup();
+            LOADER = l.findVarHandle(Node.class, "loaderCf", CompletableFuture.class);
+            UNLOAD = l.findVarHandle(Node.class, "unloadCf", CompletableFuture.class);
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
         }
-        synchronized (f) {
-            cf = withdrawal;
-            withdrawal = null;
-        }
-        return cf != null && !cf.isCancelled() && cf.cancel(true);
     }
     public static void main(String[] args) {
         Node node = new Node();

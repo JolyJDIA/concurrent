@@ -9,98 +9,13 @@ import java.lang.invoke.VarHandle;
 import java.util.concurrent.*;
 
 public class Main {
-    public static void main1(String[] args) throws InterruptedException {
-        CompletableFuture<String> cf = CompletableFuture.supplyAsync(() -> "dasdasd");
-        ConcurrentHashMap<Integer, String> map = new ConcurrentHashMap<>();
-        for (int i = 0; i < 50; ++i) {
-            map.put(i, "dsad");
-        }
-        long s = System.currentTimeMillis();
-        cf.thenComposeAsync(f -> {
-            return CompletableFuture.completedFuture(true);
-        }).thenApply(remove -> {
-            if (remove)
-                map.remove(1);
-            else
-                System.currentTimeMillis();
-            return remove;
-        });
-        long e = System.currentTimeMillis() - s;
-        System.out.println(e);
-    }
-    public static class Node {
-        /**
-         * статусы перехода
-         * гарантирует атомарность операций используем CAS вместо sync block
-         * из-за чрезвычайного уровня блокировок
-        */
-        private static final int NORMAL       = 0;
-        private static final int DONE         = 1;
-        private static final int COMPLETING   = 2;
-        private static final int INTERRUPTING = 3;
-
-        CompletableFuture<Boolean> rem;//можно опустить volatile т к я читаю один раз
-        volatile int status = DONE;
-
-        private CompletableFuture<Boolean> report() {
-            if (status != INTERRUPTING) {
-                return rem;
-            }
-            return null;
-        }
-
-        public boolean interruptRemoving() {
-            if (!STATUS.compareAndSet(this, NORMAL, INTERRUPTING))
-                return false;
-            try {
-                CompletableFuture<Boolean> cf = rem;
-                if (cf != null && (!cf.isDone() && !cf.isCancelled())) {
-                    cf.cancel(true);
-                }
-            } finally { // final state
-                STATUS.setRelease(this, DONE);
-            }
-            return true;
-        }
-        protected void set(CompletableFuture<Boolean> v) {
-            if (STATUS.compareAndSet(this, DONE, COMPLETING)) {
-                System.out.println(" новая хрень");
-                rem = v.thenApply(x -> {
-                    STATUS.setRelease(this, DONE);
-                    return x;
-                });
-                STATUS.setRelease(this, NORMAL);
-            }
-        }
-        //todo:
-        public boolean isCancelled() {
-            return status == INTERRUPTING;
-        }
-
-        public boolean isDone() {
-            return status == DONE;
-        }
-
-        // VarHandle mechanics
-        private static final VarHandle STATUS;
-        static {
-            try {
-                MethodHandles.Lookup l = MethodHandles.lookup();
-                STATUS = l.findVarHandle(Node.class, "status", int.class);
-            } catch (ReflectiveOperationException e) {
-                throw new ExceptionInInitializerError(e);
-            }
-        }
-    }
 
     public static void main(String[] args) {
         FutureCache<Integer, String> cache = new CacheBuilder<Integer, String>()
                 .removal(new CacheBuilder.RemovalListener<Integer, String>() {
                     @Override
-                    public CompletableFuture<Boolean> onRemoval(Integer key, CompletableFuture<String> v) {
-                        return v.thenApply(e -> {
-                            return true;
-                        });
+                    public CompletableFuture<Boolean> onRemoval(Integer key, String v) {
+                        return CompletableFuture.completedFuture(true);
                     }
                 })
                 .build0(new CacheBuilder.AsyncCacheLoader<Integer, String>() {
@@ -109,37 +24,15 @@ public class Main {
                         return CompletableFuture.supplyAsync(() -> "dsadasda");
                     }
                 });
-        cache.getAndPut(1).thenAccept(e -> {
-            System.out.println("add "+cache.size());
+        cache.put(1, CompletableFuture.completedFuture("CF 1")).thenRun(() -> {
+            System.out.println(cache);
+            cache.remove(1);
+            cache.put(1, CompletableFuture.supplyAsync(() -> {
+                return "CF 2";
+            })).thenRun(() -> {
+                System.out.println(cache);
+            });
         });
-        cache.removeSafe(1).thenAccept(e -> {
-            System.out.println("remove " + cache.size());
-        });
-        cache.getAndPut(1).thenAccept(e -> {
-            for (int i = 0; i < 3; ++i) {
-                new Thread(() -> {
-                    for (; ; ) {
-                        try {
-                            Thread.sleep(1);
-                        } catch (InterruptedException r) {
-                            r.printStackTrace();
-                        }
-                        int rand = ThreadLocalRandom.current().nextInt(4);
-                        cache.getAndPut(rand).thenRun(() -> {
-                             // System.out.println("add "+cache.size());
-                        });
-                    }
-                }).start();
-                new Thread(() -> {
-                    for (; ; ) {
-                        int rand = ThreadLocalRandom.current().nextInt(4);
-                        cache.removeSafe(rand).thenRun(() -> {
-                            //System.out.println("remove " + cache.size());
-                        });
-                    }
-                }).start();
-            }
-        });
-        for(;;) {}
+        for (;;) {}
     }
 }
