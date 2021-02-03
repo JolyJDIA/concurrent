@@ -10,9 +10,9 @@ import java.io.Serializable;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.*;
-import java.util.function.BiFunction;
+import java.util.concurrent.atomic.AtomicMarkableReference;
+import java.util.concurrent.atomic.AtomicStampedReference;
 import java.util.function.Consumer;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -68,7 +68,7 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
     private transient ValuesView<K,V> values;
 
     public ConcurrentCache0(CacheBuilder.AsyncCacheLoader<? super K, V> cacheLoader,
-                           CacheBuilder<K, V> builder) {
+                            CacheBuilder<K, V> builder) {
         this.cacheLoader = cacheLoader;
         this.executor = builder.getExecutor();
         this.removalListener = builder.getRemoval();
@@ -98,9 +98,23 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
         final K key;
         final long start = System.currentTimeMillis();
         volatile long lifetime = start;
-        volatile CompletableFuture<Boolean> unloadCf;
-        volatile CompletableFuture<V> loaderCf;
+        volatile CompletableFuture<Boolean> exchangeCf;
+        CompletableFuture<V> loaderCf;//volatile?
         private volatile boolean signal = true;
+
+        volatile Exchanger exchanger;
+
+        private static final VarHandle EXCHANGER;
+
+        static {
+            try {
+                MethodHandles.Lookup l = MethodHandles.lookup();
+                EXCHANGER = l.findVarHandle(Node.class, "exchanger", Exchanger.class);
+            } catch (ReflectiveOperationException e) {
+                throw new ExceptionInInitializerError(e);
+            }
+        }
+
 
         public Node(ConcurrentCache0<K, V> cache, K key, CompletableFuture<V> loader) {
             this.cache = cache;
@@ -109,55 +123,66 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
         }
 
         public CompletableFuture<Boolean> newWithdrawal() {
-            CompletableFuture<Boolean> cfL = unloadCf;
-            if ((cfL == null || cfL.isDone()) && signal) {
-                return (CompletableFuture<Boolean>) UNLOAD.compareAndExchange(this, cfL,
-                        loaderCf.thenComposeAsync(f -> {
-                            return cache.removalListener.onRemoval(key, f);
-                        }, cache.executor).thenApply(remove -> {
-                            boolean cancel = !(remove && signal);
-                            if (!cancel) {
-                                cache.map.remove(key);
-                            }
-                            lifetime = System.currentTimeMillis();
-                            return cancel;
-                        }).exceptionally(f -> false));
+            CompletableFuture<Boolean> cf = exchangeCf;
+            if (cf != null) return cf;
+
+            synchronized (this) {
+                if (signal && exchangeCf == null) {
+                    exchangeCf = loaderCf
+                            .thenComposeAsync(f -> cache.removalListener.onRemoval(key, f), cache.executor)
+                            .exceptionally(f -> false)
+                            .thenApply(remove -> {
+                                boolean cancel = !(remove && signal);
+                                if (!cancel) {
+                                    cache.map.remove(key);
+                                }
+                                lifetime = System.currentTimeMillis();
+                                return cancel;
+                            });
+                }
+                return exchangeCf;
             }
-            return cfL;
         }
+        /*
+            newWithdrawal     interruptRemoving
+                    \             /
+                   lazy    --->  then
+            remove <-/             \-> put
+                                        |
+                                       null
+         */
         public CompletableFuture<V> interruptRemoving() {
-            signal = false;
-            CompletableFuture<V> lCf = loaderCf; CompletableFuture<Boolean> r = unloadCf;
-            if (r == null) return lCf;
-            return ((CompletableFuture<Boolean>) UNLOAD.compareAndExchange(this, lCf,
-                    r.thenApply(cancelled -> {
-                        try {
-                            if (!cancelled) {
-                                cache.map.put(key, this);
-                            } return cancelled;
-                        } finally {
-                            signal = true;
-                        }
-                    }))
-            ).thenCompose(f -> lCf);
-        }
-        public CompletableFuture<V> put(CompletableFuture<V> newCf) {
-            CompletableFuture<V> cf = loaderCf; CompletableFuture<Boolean> r = unloadCf;
-            return (CompletableFuture<V>) LOADER.compareAndExchange(this, cf,
-                    (r == null ? newCf : (r.thenAcceptBoth(cf, (cancelled, v) -> {
-                        try {
-                            if (!cancelled) {
-                                cache.map.put(key, this);
-                            }
-                        } finally {
-                            signal = true;
-                        }
-                    }).thenCompose(x -> newCf))));
+            //You can omit from the lock t to newWithdrawal does not change loaderCf
+            if (exchangeCf == null) return loaderCf;
+
+            CompletableFuture<Boolean> cf;
+            synchronized (this) {
+                cf = exchangeCf;
+                if (signal) {
+                    if (cf == null) return loaderCf;
+                    signal = false;
+                    cf = cf.thenApply(cancelled -> {
+                        if (!cancelled) {
+                            cache.map.put(key, this);
+                        } return cancelled;
+                    });
+                    if (cf.isDone()) {
+                        return loaderCf;
+                    }
+                    exchangeCf = cf;
+                    return cf.thenCompose(x -> {
+                        exchangeCf = null;
+                        signal = true;
+                        return loaderCf;
+                    });
+                }
+            }
+            return cf == null ? loaderCf : cf.thenCompose(x -> loaderCf);
         }
 
         public final boolean isRemoving() {
-            CompletableFuture<Boolean> uCf = unloadCf;
-            return uCf != null && !uCf.isDone();
+            CompletableFuture<Boolean> uCf = exchangeCf;
+            return signal && uCf != null && !uCf.isDone();
         }
 
         @Override
@@ -181,52 +206,37 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
             }
             return string;
         }
-        // VarHandle mechanics
-        private static final VarHandle LOADER, UNLOAD;
-
-        static {
-            try {
-                MethodHandles.Lookup l = MethodHandles.lookup();
-                LOADER = l.findVarHandle(Node.class, "loaderCf", CompletableFuture.class);
-                UNLOAD = l.findVarHandle(Node.class, "unloadCf", CompletableFuture.class);
-            } catch (ReflectiveOperationException e) {
-                throw new ExceptionInInitializerError(e);
-            }
-        }
     }
     @Override
     public CompletableFuture<V> getAndPut(K key) {
-        CompletableFuture<V> start = new CompletableFuture<>();
-        //Не compute т к interruptRemoving может прямо сейчас делать структурные модификации мапы
-        //что нарушает спецификацию
-        Node<K,V> node = map.putIfAbsent(key, new Node<>(this, key, start));
+        //not compute t to interruptRemoving can modify the map inside the compute function
+        //which is contrary to the specification
+        Node<K,V> node = map.get(key);
         if (node == null) {
-            cacheLoader.asyncLoad(key, executor).thenAccept(x -> {
-                System.out.println("----------- new load -----------");
-                start.complete(x);
-            });
-            return start;
-        } else {
-            return node.interruptRemoving();
+            CompletableFuture<V> start = new CompletableFuture<>();
+            Node<K, V> nn = map.putIfAbsent(key, new Node<>(this, key, start));
+            if (nn == null) {
+                cacheLoader.asyncLoad(key, executor).thenAccept(start::complete);
+                return start;
+            } else {
+                return nn.interruptRemoving();
+            }
         }
+        return node.interruptRemoving();
     }
     @Override
     public CompletableFuture<V> put(K key, CompletableFuture<V> cf) {
         Node<K,V> node = map.putIfAbsent(key, new Node<>(this, key, cf));
         if (node == null) {
-            cf.thenAccept(x -> {
-                System.out.println("----------- new load -----------");
-            });
             return cf;
         }
-        return node.put(cf);
+        node.loaderCf = cf;
+        return node.interruptRemoving();
     }
 
     @Override
     public CompletableFuture<Boolean> removeSafe(K key) {
-        Node<K, V> node = map.get(key);//есть
-        //уже удалил
-        //remove 2x
+        Node<K, V> node = map.get(key);
         return node == null ? CompletableFuture.failedFuture(new NullPointerException()) : node.newWithdrawal();
     }
     @Override
@@ -235,9 +245,7 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
     }
     @Override
     public List<CompletableFuture<Boolean>> removeAll() {
-        return this.map.values().stream().map(n -> {
-            return n.newWithdrawal();
-        }).collect(Collectors.toList());
+        return map.values().stream().map(Node::newWithdrawal).collect(Collectors.toList());
     }
     public boolean containsKey(K key) {
         return map.containsKey(key);
@@ -259,7 +267,7 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
         return map.isEmpty();
     }
 
-    //  Безопасные гонки
+    // Безопасные гонки
     public KeySetView<K,V> keySet() {
         KeySetView<K,V> ks;
         if ((ks = keySet) != null) return ks;
