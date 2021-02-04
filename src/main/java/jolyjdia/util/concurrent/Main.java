@@ -46,11 +46,6 @@ public class Main {
                             return stringCompletableFuture;
                         }
                     });*/
-                    /*try {
-                        Thread.sleep(5);
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }*/
                     cache.getAndPut(rand);
                 }
             }).start();

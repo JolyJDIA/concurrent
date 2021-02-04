@@ -108,10 +108,9 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
             this.loaderCf = loader;
         }
 
-        public CompletableFuture<Boolean> newWithdrawal() {
-            CompletableFuture<Boolean> cf = exchangeCf;
-            if (cf != null) return cf;
 
+        public CompletableFuture<Boolean> newWithdrawal() {
+            CompletableFuture<Boolean> cf;
             synchronized (this) {
                 cf = exchangeCf;
                 //если signal = true, то exchangeCf = null
@@ -148,9 +147,6 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
                                        null
          */
         public CompletableFuture<V> interruptRemoving() {
-            //You can omit from the lock t to newWithdrawal does not change loaderCf
-            if (exchangeCf == null) return loaderCf;
-
             CompletableFuture<Boolean> cf;
             synchronized (this) {
                 cf = exchangeCf;
@@ -163,7 +159,7 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
                         } return false;
                     });
                     exchangeCf = cf;
-                    cf.whenComplete((r, x) -> {
+                    cf.thenRun(() -> {
                         exchangeCf = null;
                         signal = true;
                     });
@@ -205,10 +201,11 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
         //which is contrary to the specification
         Node<K,V> node = map.get(key);
         if (node == null) {
+            //не загружаем в случае если мы ошиблись, и в карте уже есть эта нода
             CompletableFuture<V> start = new CompletableFuture<>();
-            Node<K, V> nn = map.putIfAbsent(key, new Node<>(this, key, start));
+            Node<K, V> nn = map.putIfAbsent(key, new Node<>(this, key, start));//атомарно добавил
             if (nn == null) {
-                cacheLoader.asyncLoad(key, executor).thenAccept(start::complete);
+                cacheLoader.asyncLoad(key, executor).thenAccept(start::complete);//загрузим
                 return start;
             } else {
                 return nn.interruptRemoving();
