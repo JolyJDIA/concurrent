@@ -30,21 +30,27 @@ public class Main {
                         return CompletableFuture.supplyAsync(() -> "dsadasda");
                     }
                 });
-        /*ConcurrentHashMap<Integer, CompletableFuture<String>> map = new ConcurrentHashMap<>();
+        ConcurrentHashMap<Integer, CompletableFuture<String>> map = new ConcurrentHashMap<>();
         for (int i = 0; i < 3; ++i) {
             new Thread(() -> {
                 for (;;) {
                     int rand = ThreadLocalRandom.current().nextInt(3);
-                    *//*map.compute(rand, new BiFunction<Integer, CompletableFuture<String>, CompletableFuture<String>>() {
+                    /*map.compute(rand, new BiFunction<Integer, CompletableFuture<String>, CompletableFuture<String>>() {
                         @Override
                         public CompletableFuture<String> apply(Integer integer, CompletableFuture<String> stringCompletableFuture) {
+                            System.out.println("remove");
                             if (stringCompletableFuture == null) {
                                 return new CompletableFuture<>();
                             }
                             stringCompletableFuture.complete("хуй");
                             return stringCompletableFuture;
                         }
-                    });*//*
+                    });*/
+                    /*try {
+                        Thread.sleep(5);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }*/
                     cache.getAndPut(rand);
                 }
             }).start();
@@ -59,9 +65,9 @@ public class Main {
                     cache.remove(rand);
                 }
             }).start();
-        }*/
+        }
 
-        cache.put(1, CompletableFuture.completedFuture("CF 1")).thenRun(() -> {
+        /*cache.put(1, CompletableFuture.completedFuture("CF 1")).thenRun(() -> {
             System.out.println(cache);
             cache.remove(1).thenRun(() -> {
                 System.out.println(cache);
@@ -71,7 +77,7 @@ public class Main {
             })).thenRun(() -> {
                 System.out.println(cache);
             });
-        });
+        });*/
         for (;;) {}
     }
 }

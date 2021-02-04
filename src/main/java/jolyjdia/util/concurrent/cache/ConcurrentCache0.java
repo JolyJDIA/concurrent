@@ -102,20 +102,6 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
         CompletableFuture<V> loaderCf;//volatile?
         private volatile boolean signal = true;
 
-        volatile Exchanger exchanger;
-
-        private static final VarHandle EXCHANGER;
-
-        static {
-            try {
-                MethodHandles.Lookup l = MethodHandles.lookup();
-                EXCHANGER = l.findVarHandle(Node.class, "exchanger", Exchanger.class);
-            } catch (ReflectiveOperationException e) {
-                throw new ExceptionInInitializerError(e);
-            }
-        }
-
-
         public Node(ConcurrentCache0<K, V> cache, K key, CompletableFuture<V> loader) {
             this.cache = cache;
             this.key = key;
@@ -127,9 +113,14 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
             if (cf != null) return cf;
 
             synchronized (this) {
-                if (signal && exchangeCf == null) {
-                    exchangeCf = loaderCf
-                            .thenComposeAsync(f -> cache.removalListener.onRemoval(key, f), cache.executor)
+                cf = exchangeCf;
+                //если signal = true, то exchangeCf = null
+                //если signal и текущее удаление закончилось я инициализирую новое
+                if (signal && (cf == null || cf.isDone())) {
+                    return exchangeCf = loaderCf
+                            .thenComposeAsync(f -> {
+                                return cache.removalListener.onRemoval(key, f);
+                            }, cache.executor)
                             .exceptionally(f -> false)
                             .thenApply(remove -> {
                                 boolean cancel = !(remove && signal);
@@ -140,8 +131,13 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
                                 return cancel;
                             });
                 }
-                return exchangeCf;
             }
+            //в случае, если signal еще false,
+            //а exchangeCf уже null
+            if (cf == null) {
+                cf = CompletableFuture.completedFuture(false);
+            }
+            return cf;
         }
         /*
             newWithdrawal     interruptRemoving
@@ -158,22 +154,18 @@ public class ConcurrentCache0<K,V> implements FutureCache<K,V>, Serializable {
             CompletableFuture<Boolean> cf;
             synchronized (this) {
                 cf = exchangeCf;
-                if (signal) {
+                if (signal) {//значит exchangeCf == null
                     if (cf == null) return loaderCf;
                     signal = false;
                     cf = cf.thenApply(cancelled -> {
                         if (!cancelled) {
                             cache.map.put(key, this);
-                        } return cancelled;
+                        } return false;
                     });
-                    if (cf.isDone()) {
-                        return loaderCf;
-                    }
                     exchangeCf = cf;
-                    return cf.thenCompose(x -> {
+                    cf.whenComplete((r, x) -> {
                         exchangeCf = null;
                         signal = true;
-                        return loaderCf;
                     });
                 }
             }
